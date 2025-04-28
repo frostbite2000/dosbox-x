@@ -1520,6 +1520,7 @@ for /d %%i in ("$(SolutionDir)\..\contrib\translations\*") do copy "%%i\*.lng" "
     <ClCompile Include="..\src\hardware\voodoo_opengl.cpp" />
     <ClCompile Include="..\src\hardware\voodoo_vogl.cpp" />
     <ClCompile Include="..\src\hardware\glide.cpp" />
+    <ClCompile Include="..\src\hardware\d3d.cpp" />
     <ClCompile Include="..\src\ints\bios.cpp" />
     <ClCompile Include="..\src\ints\bios_disk.cpp" />
     <ClCompile Include="..\src\ints\bios_keyboard.cpp" />

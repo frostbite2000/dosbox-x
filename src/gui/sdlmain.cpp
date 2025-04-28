@@ -7451,6 +7451,7 @@ void FPU_Init();
 void KEYBOARD_Init();
 void VOODOO_Init();
 void GLIDE_Init();
+void D3D_Init();
 void MIXER_Init();
 void MIDI_Init();
 
@@ -9130,6 +9131,7 @@ int main(int argc, char* argv[]) SDL_MAIN_NOEXCEPT {
         Init_VGABIOS();
         VOODOO_Init();
         GLIDE_Init();
+        D3D_Init();
         PROGRAMS_Init(); /* <- NTS: Does not init programs, it inits the callback used later when creating the .COM programs on drive Z: */
         PCSPEAKER_Init();
         TANDYSOUND_Init();
