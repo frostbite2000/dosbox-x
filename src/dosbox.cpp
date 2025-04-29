@@ -928,7 +928,7 @@ void Init_VGABIOS() {
             else if (svgaCard == SVGA_S3Trio) {
                 VGA_BIOS_rom = "TRIO64 (Ver. 1.5-07) [VGA] (S3 Incorporated).bin"; // Ref: PCem ROMs collection
             }
-            else if (svgaCard == SVGA_NV3Riva) {
+            else if (svgaCard == SVGA_NV3RIVA) {
                 VGA_BIOS_rom = "diamond_v330_rev-e.vbi"; // Ref: 86Box NV3 roms by starfrost fork
             }
         }
@@ -1231,7 +1231,7 @@ void DOSBOX_RealInit() {
     else if (mtype == "vesa_nolfb")    { svgaCard = SVGA_S3Trio; s3Card = S3_Trio32; int10.vesa_nolfb = true;}
     else if (mtype == "vesa_oldvbe")   { svgaCard = SVGA_S3Trio; s3Card = S3_Trio32; int10.vesa_oldvbe = true;}
     else if (mtype == "vesa_oldvbe10") { svgaCard = SVGA_S3Trio; s3Card = S3_Trio32; int10.vesa_oldvbe = true; int10.vesa_oldvbe10 = true;}
-    else if (mtype == "svga_nv_riva128") { svgaCard = SVGA_NV3Riva; nvCard = NV_Riva128; }
+    else if (mtype == "svga_nv_riva128") { svgaCard = SVGA_NV3RIVA; nvCard = NV_Riva128; }
     else if (mtype == "svga_et4000")   { svgaCard = SVGA_TsengET4K; }
     else if (mtype == "svga_et3000")   { svgaCard = SVGA_TsengET3K; }
     else if (mtype == "svga_paradise") { svgaCard = SVGA_ParadisePVGA1A; }
