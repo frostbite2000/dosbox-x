@@ -50829,7 +50829,8 @@ enum SVGACards {
  SVGA_TsengET4K,
  SVGA_TsengET3K,
  SVGA_ParadisePVGA1A,
- SVGA_ATI
+ SVGA_ATI,
+ SVGA_NV3RIVA
 };
 
 enum S3Card {
@@ -50860,10 +50861,15 @@ enum ATICard {
  ATI_Mach64
 };
 
+enum NVCard {
+    NV_Riva128
+};
+
 typedef Bitu (LoopHandler)(void);
 
 extern Config* control;
 extern SVGACards svgaCard;
+extern NVCard nvCard;
 extern ATICard atiCard;
 extern S3Card s3Card;
 extern HerculesCard hercCard;

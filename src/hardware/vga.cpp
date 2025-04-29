@@ -1729,6 +1729,9 @@ void SVGA_Setup_Driver(void) {
 		case SVGA_ATI:
 			SVGA_Setup_ATI();
 			break;
+        case SVGA_NV3RIVA:
+            SVGA_Setup_NV3RIVA();
+            break;
 		default:
 			if (IS_JEGA_ARCH) SVGA_Setup_JEGA();
 			break;

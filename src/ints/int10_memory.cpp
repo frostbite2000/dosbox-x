@@ -304,6 +304,18 @@ void INT10_SetupRomMemory(void) {
 						phys_writes(rom_base+0x003f, "S3 86C764", 10);
 					}
 					break;
+				case SVGA_NV3RIVA:
+					if(!VGA_BIOS_use_rom) {
+						switch (nvCard) {
+						case NV_Riva128:
+							phys_writes(rom_base+0x40, "051562LGC", 9);
+							phys_writes(rom_base+0x004f, "Diamond Multimedia Systems, Inc. Viper V330 Version 1.62-CO", 59);
+							break;
+						default:
+							break;
+						};
+					}
+					break;
 				case SVGA_TsengET4K:
 				case SVGA_TsengET3K:
 					if(!VGA_BIOS_use_rom) {

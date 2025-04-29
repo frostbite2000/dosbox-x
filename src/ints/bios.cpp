@@ -11222,6 +11222,12 @@ startfunction:
                             case ATI_Mach64:           card = "ATI Mach64"; break;
                         }
                         break;
+                    case SVGA_NV3RIVA:
+                        card = "RIVA 128 SVGA";
+                        switch (atiCard) {
+                            case NV_Riva128:     card = "NVidia RIVA 128"; break;
+                        }
+                        break;
                     default:
                         card = "Standard VGA";
                         break;

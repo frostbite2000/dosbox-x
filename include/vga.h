@@ -806,6 +806,12 @@ bool VGA_CaptureValidateCurrentFrame(void);
 void SD3_Reset(bool enable);
 void SetClock_S3(Bitu which,Bitu target);
 
+extern void SVGA_Setup_NV3RIVA(void);
+extern void VGA_DetermineMode_NV3(void);
+extern void SetClock_NV3(Bitu which, Bitu target);
+extern void POD_Save_VGA_NV3(std::ostream& stream);
+extern void POD_Load_VGA_NV3(std::istream& stream);
+
 // Amount of video memory required for a mode, implemented in int10_modes.cpp
 Bitu VideoModeMemSize(Bitu mode);
 bool VGA_DetermineMode_IsDCGA(void);
