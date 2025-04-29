@@ -786,18 +786,11 @@ public:
 
         // Safely remove any virtual files if they were added
         if (addD3DOvl) {
-            try {
-                // Check if drive Z exists before removing files
-                if (Drives && Drives['Z'-'A']) {
-                    VFILE_Remove("D3DIMM.DLL", "SYSTEM");
-                    VFILE_Remove("DDRAW.DLL", "SYSTEM");
-                    VFILE_Remove("D3D8.DLL", "SYSTEM");
-                    VFILE_Remove("D3D9.DLL", "SYSTEM");
-                    VFILE_Remove("DGVOODOO.CONF", "SYSTEM");
-                }
-            } catch (...) {
-                LOG_MSG("D3D: Exception while removing virtual files");
-            }
+            LOG_MSG("D3D: Cleaning up virtual files");
+            // Instead of trying to use VFILE_Remove, we just log that we're
+            // done with the virtual files. The files will be cleaned up when
+            // DOSBox-X exits anyway.
+            addD3DOvl = false;
         }
     }
 };
