@@ -119,6 +119,7 @@ struct D3D_Block {
     uint32_t vram_size;
     bool vsync;
     bool fullscreen[2];    // current and toggle state
+    uint32_t pci_registers[MAX_PCI_REGISTERS]; // PCI registers array
 };
 
 // Global D3D state
@@ -130,7 +131,8 @@ D3D_Block d3d = {
     GPU_AUTO_DETECT, // gpu_type
     256*1024*1024, // vram_size (default 256MB)
     true,       // vsync
-    {false, false} // fullscreen
+    {false, false}, // fullscreen
+    {0}         // pci_registers (initialized to 0)
 };
 
 // Global DLL handles
@@ -313,11 +315,11 @@ void d3d_init_pci_registers() {
 static Bitu read_d3d(Bitu port, Bitu iolen) {
     (void)port;
     (void)iolen;
-    Bitu r = d3d_ret_value;
+    Bitu r=d3d_ret_value;
 #if LOG_D3D
-    if (d3d_ret_value == D3D_OK)
+    if(d3d_ret_value == D3D_OK)
         LOG_MSG("D3D: Port read. Return address: 0x%x, value: %d", d3d_ret, mem_readd(d3d_ret));
-    else if (d3d_ret_value == D3D_FAIL)
+    else if(d3d_ret_value == D3D_FAIL)
         LOG_MSG("D3D: Port read. Return address: 0x%x, value: %d. Writing D3D_FAIL to port", d3d_ret, mem_readd(d3d_ret));
     else
         LOG_MSG("D3D: Port read. Returning %hu", d3d_ret_value);
@@ -337,11 +339,11 @@ static void write_d3d(Bitu port, Bitu val, Bitu iolen) {
     d3d_ret_value = D3D_FAIL;
 
     // Allocate shared memory (80 bytes)
-    if (val > 0xFF) {
-        if (d3d_segment == 0 && !DOS_GetMemory_unmapped) {
-            d3d_segment = DOS_GetMemory(5);
+    if(val > 0xFF) {
+        if(d3d_segment==0 && !DOS_GetMemory_unmapped) {
+            d3d_segment=DOS_GetMemory(5);
 #if LOG_D3D
-            LOG_MSG("D3D: Memory allocated at 0x%x (segment: %hu)", d3d_segment << 4, d3d_segment);
+            LOG_MSG("D3D: Memory allocated at 0x%x (segment: %hu)", d3d_segment<<4, d3d_segment);
 #endif
         }
         // Even if DOS_GetMemory failed, still return segment to avoid crashing
@@ -373,7 +375,7 @@ static void statWMInfo(void) {
     SDL_SysWMinfo wmi;
     SDL_VERSION(&wmi.version);
 #if defined(C_SDL2)
-    if (SDL_GetWindowWMInfo(sdl.window, &wmi)) {
+    if(SDL_GetWindowWMInfo(sdl.window, &wmi)) {
 # if defined (WIN32)
         hwnd = (HostPt)wmi.info.win.window;
 # elif defined (C_X11) && defined(LINUX)
@@ -381,7 +383,7 @@ static void statWMInfo(void) {
 # endif
 #else
     SDL_VERSION(&wmi.version);
-    if (SDL_GetWMInfo(&wmi)) {
+    if(SDL_GetWMInfo(&wmi)) {
 # if defined (WIN32)
         hwnd = (HostPt)wmi.window;
 # elif defined (C_X11) && defined(LINUX)
