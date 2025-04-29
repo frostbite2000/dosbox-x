@@ -81,7 +81,8 @@ static float int_to_float(const uint32_t i)
 #define PCI_READ(reg) d3d_pci_read(reg)
 #define PCI_WRITE(reg, val) d3d_pci_write(reg, val)
 
-void VFILE_Remove(const char *name, const char *dir = "");
+void VFILE_Register(const char *name, const char *path, const char *ext);
+bool VFILE_Remove(const char *name, const char *dir);
 static void process_d3d_message(Bitu);
 
 // D3D DLL types
@@ -113,7 +114,6 @@ struct D3D_Block {
     uint16_t width;
     uint16_t height;
     bool splash;
-    uint32_t pci_registers[MAX_PCI_REGISTERS];
     class D3D_PageHandler* lfb_pagehandler;
     D3D_GPU_TYPE gpu_type;
     uint32_t vram_size;
@@ -122,7 +122,16 @@ struct D3D_Block {
 };
 
 // Global D3D state
-D3D_Block d3d;
+D3D_Block d3d = {
+    false,      // enabled
+    0, 0,       // width, height
+    false,      // splash
+    NULL,       // lfb_pagehandler 
+    GPU_AUTO_DETECT, // gpu_type
+    256*1024*1024, // vram_size (default 256MB)
+    true,       // vsync
+    {false, false} // fullscreen
+};
 
 // Global DLL handles
 #if defined (WIN32)
@@ -173,11 +182,11 @@ static const D3D_TABLE d3d9_table[] = {
 };
 
 // Shared memory for D3D calls
-static uint32_t d3d_param[20];
+static uint32_t d3d_param[20] = {0};
 
 // Pointer to return value
-static PhysPt d3d_ret;
-static uint16_t d3d_ret_value;
+static PhysPt d3d_ret = 0;
+static uint16_t d3d_ret_value = 0;
 
 // D3D wrapper buffer size
 #define D3D_BUFFER_SIZE (8 * 1024 * 1024)  // 8MB buffer
@@ -193,7 +202,7 @@ static char lfbacc = 0;
 
 // Debug counters for function calls
 #if LOG_D3D
-static int D3D_CALL_COUNTS[256];
+static int D3D_CALL_COUNTS[256] = {0};
 #endif
 
 // GPU manufacturer info and PCI device IDs
@@ -335,17 +344,31 @@ static void write_d3d(Bitu port, Bitu val, Bitu iolen) {
             LOG_MSG("D3D: Memory allocated at 0x%x (segment: %hu)", d3d_segment << 4, d3d_segment);
 #endif
         }
+        // Even if DOS_GetMemory failed, still return segment to avoid crashing
         d3d_ret_value = d3d_segment;
         LOG_MSG("D3D: Activated");
         return;
     }
 
+    // Safety check - make sure segment is valid
+    if (d3d_segment == 0) {
+        LOG_MSG("D3D: Error - Memory segment not allocated");
+        return;
+    }
+
     // Process function parameters (80 bytes)
-    MEM_BlockRead32(PhysMake(d3d_segment, 0), d3d_param, 80);
-    process_d3d_message(val);
+    // Safely read memory, checking for valid segment
+    PhysPt physAddress = PhysMake(d3d_segment, 0);
+    if (physAddress != 0) {
+        MEM_BlockRead32(physAddress, d3d_param, 80);
+        process_d3d_message(val);
+    }
 }
 
 static void statWMInfo(void) {
+    // Initialize hwnd to NULL to avoid using uninitialized value
+    hwnd = NULL;
+    
     // Get hwnd information
     SDL_SysWMinfo wmi;
     SDL_VERSION(&wmi.version);
@@ -365,8 +388,9 @@ static void statWMInfo(void) {
         hwnd = (HostPt)wmi.info.x11.window;
 # endif
 #endif
-    } else
+    } else {
         LOG_MSG("SDL: Error retrieving window information");
+    }
 }
 
 class D3D_PageHandler : public PageHandler {
@@ -376,14 +400,34 @@ private:
     HostPt lfb_addr[D3D_BUFFERS];   // Address offset from base_addr for the readable/writable buffers
 
     /* Calculate physical address for access */
-    #define LFB_getAddr(addr) (lfb_addr[((addr - base_addr[0])>>12)>>D3D_PAGE_BITS]+addr)
+    HostPt LFB_getAddr(PhysPt addr) {
+        Bitu buffer_idx = ((addr - base_addr[0]) >> 12) >> D3D_PAGE_BITS;
+        if (buffer_idx >= D3D_BUFFERS) {
+            buffer_idx = 0; // Fail safe
+        }
+        if (!lfb_addr[buffer_idx]) {
+            // Safety check - shouldn't happen, but avoid crash if it does
+            LOG_MSG("D3D: Warning - null lfb_addr for buffer %d", buffer_idx);
+            return NULL;
+        }
+        return lfb_addr[buffer_idx] + addr;
+    }
 
 public:
     uint8_t locked[D3D_BUFFERS];
 
     D3D_PageHandler(HostPt addr, PhysPt phyaddr = D3D_LFB) {
+        // Initialize arrays to safe values
+        for (int i = 0; i < D3D_BUFFERS; i++) {
+            locked[i] = 0;
+            base_addr[i] = 0;
+            lin_addr[i] = 0;
+            lfb_addr[i] = NULL;
+        }
+
         if (addr == NULL) {
             LOG_MSG("D3D: NULL address passed to pagehandler!");
+            return;
         }
 
         /* Set base addresses */
@@ -393,7 +437,7 @@ public:
             phyaddr += ((1 << D3D_PAGE_BITS) << 12);
 
             /* store offset from base address */
-            lfb_addr[i] = (addr == NULL) ? NULL : (addr - base_addr[i]);
+            lfb_addr[i] = addr - base_addr[i];
         }
 
         flags = PFLAG_READABLE | PFLAG_WRITEABLE | PFLAG_NOCODE;
@@ -405,13 +449,15 @@ public:
 
     ~D3D_PageHandler() {
 #if LOG_D3D
-        LOG_MSG("D3D: Resetting page handler at 0x%x", base_addr[0]);
+        LOG_MSG("D3D: Resetting page handler");
 #endif
-        PAGING_UnlinkPages(base_addr[0] >> 12, D3D_PAGES);
+        if (base_addr[0] != 0) {
+            PAGING_UnlinkPages(base_addr[0] >> 12, D3D_PAGES);
+        }
     }
 
     void SetLFBAddr(HostPt addr, Bitu buffer) {
-        if (buffer >= D3D_BUFFERS) return;
+        if (buffer >= D3D_BUFFERS || base_addr[buffer] == 0) return;
 
         addr = addr - base_addr[buffer];  /* Calculate offset for current buffer */
 
@@ -442,48 +488,66 @@ public:
     }
 
     uint8_t readb(PhysPt addr) override {
-        return *(uint8_t *)(LFB_getAddr(addr));
+        HostPt hostAddr = LFB_getAddr(addr);
+        if (!hostAddr) return 0;
+        return *(uint8_t*)hostAddr;
     }
 
     uint16_t readw(PhysPt addr) override {
-        return *(uint16_t *)(LFB_getAddr(addr));
+        HostPt hostAddr = LFB_getAddr(addr);
+        if (!hostAddr) return 0;
+        return *(uint16_t*)hostAddr;
     }
 
     uint32_t readd(PhysPt addr) override {
-        return *(uint32_t *)(LFB_getAddr(addr));
+        HostPt hostAddr = LFB_getAddr(addr);
+        if (!hostAddr) return 0;
+        return *(uint32_t*)hostAddr;
     }
 
     void writeb(PhysPt addr, uint8_t val) override {
-        *(uint8_t *)(LFB_getAddr(addr)) = (uint8_t)val;
+        HostPt hostAddr = LFB_getAddr(addr);
+        if (!hostAddr) return;
+        *(uint8_t*)hostAddr = val;
     }
 
     void writew(PhysPt addr, uint16_t val) override {
-        *(uint16_t *)(LFB_getAddr(addr)) = (uint16_t)val;
+        HostPt hostAddr = LFB_getAddr(addr);
+        if (!hostAddr) return;
+        *(uint16_t*)hostAddr = val;
     }
 
     void writed(PhysPt addr, uint32_t val) override {
-        *(uint32_t *)(LFB_getAddr(addr)) = (uint32_t)val;
+        HostPt hostAddr = LFB_getAddr(addr);
+        if (!hostAddr) return;
+        *(uint32_t*)hostAddr = val;
     }
 
     HostPt GetHostReadPt(PageNum phys_page) override {
+        if (base_addr[0] == 0) return NULL;
+        
         Bitu buffer = (((phys_page << 12) - base_addr[0]) >> 12) >> D3D_PAGE_BITS;
+        if (buffer >= D3D_BUFFERS) buffer = 0;
+        
 #if LOG_D3D
         // This only makes sense if full lfb access is used...
         if (!locked[buffer]) LOG_MSG("D3D: Read from unlocked LFB at: 0x%x", phys_page << 12);
 #endif
-        return lfb_addr[buffer] + (phys_page << 12);
+        return lfb_addr[buffer] ? (lfb_addr[buffer] + (phys_page << 12)) : NULL;
     }
 
     HostPt GetHostWritePt(PageNum phys_page) override {
+        if (base_addr[0] == 0) return NULL;
+        
         Bitu buffer = (((phys_page << 12) - base_addr[0]) >> 12) >> D3D_PAGE_BITS;
+        if (buffer >= D3D_BUFFERS) buffer = 0;
+        
 #if LOG_D3D
         // This only makes sense if full lfb access is used...
         if (!locked[buffer]) LOG_MSG("D3D: Write to unlocked LFB at: 0x%x", phys_page << 12);
 #endif
-        return lfb_addr[buffer] + (phys_page << 12);
+        return lfb_addr[buffer] ? (lfb_addr[buffer] + (phys_page << 12)) : NULL;
     }
-
-    #undef LFB_getAddr
 };
 
 bool addD3DOvl = false;
@@ -508,11 +572,11 @@ bool load_dgVoodoo2_dll(D3D_DLL_TYPE type) {
     dll_handles[type] = LoadLibrary(wrapper_names[type]);
 #elif defined(MACOSX)
     char wrapper_dylib[64];
-    sprintf(wrapper_dylib, "lib%s.dylib", wrapper_names[type]);
+    snprintf(wrapper_dylib, sizeof(wrapper_dylib), "lib%s.dylib", wrapper_names[type]);
     dll_handles[type] = dlopen(wrapper_dylib, RTLD_NOW);
 #else
     char wrapper_so[64];
-    sprintf(wrapper_so, "lib%s.so", wrapper_names[type]);
+    snprintf(wrapper_so, sizeof(wrapper_so), "lib%s.so", wrapper_names[type]);
     dll_handles[type] = dlopen(wrapper_so, RTLD_NOW);
 #endif
 
@@ -566,7 +630,7 @@ public:
         addD3DOvl = false;
         Section_prop* section = static_cast<Section_prop*>(configuration);
 
-        if (!section->Get_bool("d3d")) return;
+        if (!section || !section->Get_bool("d3d")) return;
         
         // LFB settings
         std::string str = section->Get_string("lfb");
@@ -624,28 +688,44 @@ public:
         // Initialize PCI registers based on the GPU type
         d3d_init_pci_registers();
 
-        // Preload required DLLs
-        load_dgVoodoo2_dll(D3DIMM_DLL);
-        load_dgVoodoo2_dll(DDRAW_DLL);
-        load_dgVoodoo2_dll(D3D8_DLL);
-        load_dgVoodoo2_dll(D3D9_DLL);
-
-        // Allocate buffer for D3D operations
-        d3d_buffer = (void*)malloc(D3D_BUFFER_SIZE);
-        if (d3d_buffer == NULL) {
-            LOG_MSG("D3D: Unable to allocate D3D buffer memory, D3D disabled");
-            return;
+        // Try to preload required DLLs but don't fail if they're not found
+        try {
+            load_dgVoodoo2_dll(D3DIMM_DLL);
+            load_dgVoodoo2_dll(DDRAW_DLL);
+            load_dgVoodoo2_dll(D3D8_DLL);
+            load_dgVoodoo2_dll(D3D9_DLL);
+        } catch (...) {
+            LOG_MSG("D3D: Exception while loading dgVoodoo2 DLLs");
         }
 
-        d3d.lfb_pagehandler = new D3D_PageHandler((HostPt)d3d_buffer);
-        if (!d3d.lfb_pagehandler) {
-            LOG_MSG("D3D: Failed to install page handler, D3D disabled!");
-            free(d3d_buffer); d3d_buffer = NULL;
+        // Allocate buffer for D3D operations
+        try {
+            d3d_buffer = (void*)malloc(D3D_BUFFER_SIZE);
+            if (d3d_buffer == NULL) {
+                LOG_MSG("D3D: Unable to allocate D3D buffer memory, D3D disabled");
+                return;
+            }
+
+            // Initialize buffer with zeros to avoid undefined behavior
+            memset(d3d_buffer, 0, D3D_BUFFER_SIZE);
+            
+            d3d.lfb_pagehandler = new D3D_PageHandler((HostPt)d3d_buffer);
+            if (!d3d.lfb_pagehandler) {
+                LOG_MSG("D3D: Failed to install page handler, D3D disabled!");
+                free(d3d_buffer); d3d_buffer = NULL;
+                return;
+            }
+        } catch (...) {
+            LOG_MSG("D3D: Exception while setting up D3D buffer");
+            if (d3d_buffer) {
+                free(d3d_buffer);
+                d3d_buffer = NULL;
+            }
             return;
         }
 
 #if LOG_D3D
-        SDL_memset(D3D_CALL_COUNTS, 0, sizeof(D3D_CALL_COUNTS));
+        memset(D3D_CALL_COUNTS, 0, sizeof(D3D_CALL_COUNTS));
 #endif
 
         // Define I/O port for D3D wrapper
@@ -657,7 +737,12 @@ public:
         ostringstream temp;
         temp << "@SET D3D=" << hex << d3d_base << ends;
 
-        autoexecline.Install(temp.str());
+        try {
+            autoexecline.Install(temp.str());
+        } catch (...) {
+            LOG_MSG("D3D: Failed to install autoexec line");
+        }
+        
         d3d.splash = section->Get_bool("splash");
         d3d.enabled = false; // Will be enabled when a D3D app is detected
 
@@ -666,7 +751,11 @@ public:
 
     ~D3D() {
         if (d3d.enabled) {
-            D3D_DisableScreen();
+            try {
+                D3D_DisableScreen();
+            } catch (...) {
+                LOG_MSG("D3D: Exception while disabling screen");
+            }
             d3d.enabled = false;
         }
 
@@ -693,30 +782,58 @@ public:
             }
         }
 
+        // Safely remove any virtual files if they were added
         if (addD3DOvl) {
-            VFILE_Remove("D3DIMM.DLL", "SYSTEM");
-            VFILE_Remove("DDRAW.DLL", "SYSTEM");
-            VFILE_Remove("D3D8.DLL", "SYSTEM");
-            VFILE_Remove("D3D9.DLL", "SYSTEM");
-            VFILE_Remove("DGVOODOO.CONF", "SYSTEM");
+            try {
+                // Check if drive Z exists before removing files
+                if (Drives && Drives['Z'-'A']) {
+                    VFILE_Remove("D3DIMM.DLL", "SYSTEM");
+                    VFILE_Remove("DDRAW.DLL", "SYSTEM");
+                    VFILE_Remove("D3D8.DLL", "SYSTEM");
+                    VFILE_Remove("D3D9.DLL", "SYSTEM");
+                    VFILE_Remove("DGVOODOO.CONF", "SYSTEM");
+                }
+            } catch (...) {
+                LOG_MSG("D3D: Exception while removing virtual files");
+            }
         }
     }
 };
 
-static D3D* test_d3d;
+static D3D* test_d3d = NULL;
 
 void D3D_ShutDown(Section* sec) {
-    (void)sec;//UNUSED
-    delete test_d3d;
+    (void)sec; // UNUSED
+    if (test_d3d) {
+        delete test_d3d;
+        test_d3d = NULL;
+    }
 }
 
 void D3D_PowerOn(Section* sec) {
-    test_d3d = new D3D(sec);
+    if (test_d3d) {
+        D3D_ShutDown(sec);
+    }
+    try {
+        test_d3d = new D3D(sec);
+    } catch (...) {
+        LOG_MSG("D3D: Exception during D3D initialization");
+        test_d3d = NULL;
+    }
 }
 
 void D3D_Init() {
-    test_d3d = new D3D(control->GetSection("d3d"));
-    AddExitFunction(AddExitFunctionFuncPair(D3D_ShutDown), true);
+    try {
+        Section* sec = control->GetSection("d3d");
+        if (sec) {
+            test_d3d = new D3D(sec);
+            if (test_d3d) {
+                AddExitFunction(AddExitFunctionFuncPair(D3D_ShutDown), true);
+            }
+        }
+    } catch (...) {
+        LOG_MSG("D3D: Failed to initialize D3D module");
+    }
 }
 
 // Function that processes D3D wrapper messages
@@ -735,172 +852,201 @@ static void process_d3d_message(Bitu value) {
 
 #if LOG_D3D
     LOG_MSG("D3D: Processing call (%d), return address: 0x%x", value, d3d_ret);
-    D3D_CALL_COUNTS[value]++;
+    if (value < 256) {
+        D3D_CALL_COUNTS[value]++;
+    }
 #endif
 
     // Handle different D3D API calls based on the value
-    switch (value) {
-        case 0x01:  // Initialize D3D
-            if (d3d.enabled) break;  // Already initialized
-            
-            // Initialize D3D subsystem
-            d3d.enabled = true;
-            d3d.width = d3d_param[1];
-            d3d.height = d3d_param[2];
-            
-            LOG_MSG("D3D: Initializing with resolution %dx%d", d3d.width, d3d.height);
-            
-            // Resize window and configure screen
-            D3D_ResetScreen(true);
-
-            // Get window handle
-            statWMInfo();
-
-            // Send LFB to the D3D wrapper
-            mem_writed(d3d_param[3], d3d.lfb_pagehandler->GetPhysPt());
-            mem_writed(d3d_param[4], D3D_PAGES);
-            
-            // Set up PCI information
-            mem_writed(d3d_param[5], d3d.gpu_type);
-            mem_writed(d3d_param[6], d3d.vram_size);
-
-            // Return success
-            d3d_ret_value = D3D_OK;
-            break;
-
-        case 0x02:  // Shutdown D3D
-            if (d3d.enabled) {
-                LOG_MSG("D3D: Shutting down D3D subsystem");
-                D3D_DisableScreen();
-                d3d.enabled = false;
-            }
-            d3d_ret_value = D3D_OK;
-            break;
-
-        case 0x10:  // Lock framebuffer
-            if (!d3d.enabled) break;
-            {
-                Bitu buffer = d3d_param[1];
-                if (buffer >= D3D_BUFFERS) {
-                    LOG_MSG("D3D: Invalid buffer passed in LFB lock (%lu)", buffer);
-                    break;
+    try {
+        switch (value) {
+            case 0x01:  // Initialize D3D
+                if (d3d.enabled) {
+                    d3d_ret_value = D3D_OK;
+                    break;  // Already initialized
                 }
                 
-                // Check LFB access permissions
-                Bitu access_mode = d3d_param[2] & 0x03;  // 1=read, 2=write, 3=read-write
-                if ((access_mode > 0) && ((access_mode & lfbacc) == 0)) {
-                    LOG_MSG("D3D: LFB access denied (mode %d)", access_mode);
-                    break;
+                // Initialize D3D subsystem
+                d3d.enabled = true;
+                d3d.width = d3d_param[1];
+                d3d.height = d3d_param[2];
+                
+                LOG_MSG("D3D: Initializing with resolution %dx%d", d3d.width, d3d.height);
+                
+                // Resize window and configure screen
+                D3D_ResetScreen(true);
+
+                // Get window handle
+                statWMInfo();
+
+                // Make sure we have a valid page handler
+                if (d3d.lfb_pagehandler) {
+                    // Send LFB to the D3D wrapper
+                    mem_writed(d3d_param[3], d3d.lfb_pagehandler->GetPhysPt());
+                    mem_writed(d3d_param[4], D3D_PAGES);
+                    
+                    // Set up PCI information
+                    mem_writed(d3d_param[5], d3d.gpu_type);
+                    mem_writed(d3d_param[6], d3d.vram_size);
+
+                    // Return success
+                    d3d_ret_value = D3D_OK;
                 }
+                break;
+
+            case 0x02:  // Shutdown D3D
+                if (d3d.enabled) {
+                    LOG_MSG("D3D: Shutting down D3D subsystem");
+                    D3D_DisableScreen();
+                    d3d.enabled = false;
+                }
+                d3d_ret_value = D3D_OK;
+                break;
+
+            case 0x10:  // Lock framebuffer
+                if (!d3d.enabled || !d3d.lfb_pagehandler) break;
                 
-                d3d.lfb_pagehandler->locked[buffer]++;
-                
-                // Return linear address pointer
-                mem_writed(d3d_ret, d3d.lfb_pagehandler->GetLinPt(buffer));
-                
+                {
+                    Bitu buffer = d3d_param[1];
+                    if (buffer >= D3D_BUFFERS) {
+                        LOG_MSG("D3D: Invalid buffer passed in LFB lock (%lu)", buffer);
+                        break;
+                    }
+                    
+                    // Check LFB access permissions
+                    Bitu access_mode = d3d_param[2] & 0x03;  // 1=read, 2=write, 3=read-write
+                    if ((access_mode > 0) && ((access_mode & lfbacc) == 0)) {
+                        LOG_MSG("D3D: LFB access denied (mode %d)", access_mode);
+                        break;
+                    }
+                    
+                    d3d.lfb_pagehandler->locked[buffer]++;
+                    
+                    // Return linear address pointer
+                    mem_writed(d3d_ret, d3d.lfb_pagehandler->GetLinPt(buffer));
+                    
 #if LOG_D3D
-                LOG_MSG("D3D: LFB lock buffer (%d), returning address 0x%x", 
-                    buffer, d3d.lfb_pagehandler->GetLinPt(buffer));
+                    LOG_MSG("D3D: LFB lock buffer (%d), returning address 0x%x", 
+                        buffer, d3d.lfb_pagehandler->GetLinPt(buffer));
 #endif
-                d3d_ret_value = D3D_OK;
-            }
-            break;
-            
-        case 0x11:  // Unlock framebuffer
-            if (!d3d.enabled) break;
-            {
-                Bitu buffer = d3d_param[1];
-                if (buffer >= D3D_BUFFERS) {
-                    LOG_MSG("D3D: Invalid buffer passed in LFB unlock (%lu)", buffer);
-                    break;
+                    d3d_ret_value = D3D_OK;
                 }
+                break;
                 
-                if (d3d.lfb_pagehandler->locked[buffer]) {
-                    d3d.lfb_pagehandler->locked[buffer]--;
+            case 0x11:  // Unlock framebuffer
+                if (!d3d.enabled || !d3d.lfb_pagehandler) break;
+                
+                {
+                    Bitu buffer = d3d_param[1];
+                    if (buffer >= D3D_BUFFERS) {
+                        LOG_MSG("D3D: Invalid buffer passed in LFB unlock (%lu)", buffer);
+                        break;
+                    }
+                    
+                    if (d3d.lfb_pagehandler->locked[buffer] > 0) {
+                        d3d.lfb_pagehandler->locked[buffer]--;
 #if LOG_D3D
-                    LOG_MSG("D3D: LFB unlock buffer (%d), %d locks remaining", 
-                        buffer, d3d.lfb_pagehandler->locked[buffer]);
+                        LOG_MSG("D3D: LFB unlock buffer (%d), %d locks remaining", 
+                            buffer, d3d.lfb_pagehandler->locked[buffer]);
 #endif
+                        d3d_ret_value = D3D_OK;
+                    }
                 }
-                d3d_ret_value = D3D_OK;
-            }
-            break;
-            
-        case 0x20:  // PCI register read
-            {
-                Bitu reg = d3d_param[1];
-                if (reg >= MAX_PCI_REGISTERS) {
-                    LOG_MSG("D3D: Invalid PCI register read: 0x%x", reg);
-                    break;
-                }
+                break;
                 
-                uint32_t value = PCI_READ(reg);
-                mem_writed(d3d_ret, value);
+            case 0x20:  // PCI register read
+                {
+                    Bitu reg = d3d_param[1];
+                    if (reg >= MAX_PCI_REGISTERS) {
+                        LOG_MSG("D3D: Invalid PCI register read: 0x%x", reg);
+                        break;
+                    }
+                    
+                    uint32_t value = PCI_READ(reg);
+                    mem_writed(d3d_ret, value);
 #if LOG_D3D
-                LOG_MSG("D3D: PCI read register 0x%x = 0x%08x", reg, value);
+                    LOG_MSG("D3D: PCI read register 0x%x = 0x%08x", reg, value);
 #endif
-                d3d_ret_value = D3D_OK;
-            }
-            break;
-            
-        case 0x21:  // PCI register write
-            {
-                Bitu reg = d3d_param[1];
-                uint32_t value = d3d_param[2];
-                
-                if (reg >= MAX_PCI_REGISTERS) {
-                    LOG_MSG("D3D: Invalid PCI register write: 0x%x", reg);
-                    break;
+                    d3d_ret_value = D3D_OK;
                 }
+                break;
                 
+            case 0x21:  // PCI register write
+                {
+                    Bitu reg = d3d_param[1];
+                    uint32_t value = d3d_param[2];
+                    
+                    if (reg >= MAX_PCI_REGISTERS) {
+                        LOG_MSG("D3D: Invalid PCI register write: 0x%x", reg);
+                        break;
+                    }
+                    
 #if LOG_D3D
-                LOG_MSG("D3D: PCI write register 0x%x = 0x%08x", reg, value);
+                    LOG_MSG("D3D: PCI write register 0x%x = 0x%08x", reg, value);
 #endif
-                PCI_WRITE(reg, value);
-                d3d_ret_value = D3D_OK;
-            }
-            break;
-            
-        case 0x30:  // Get D3D wrapper info
-            {
-                // Return D3D wrapper version and GPU information
-                char info[256];
-                sprintf(info, "dgVoodoo2 D3D Wrapper - Emulating %s %s with %dMB VRAM",
-                    gpu_manufacturer[d3d.gpu_type],
-                    d3d_param[1] ? "GPU" : "Display Adapter",
-                    d3d.vram_size / (1024 * 1024));
-                
-                // Copy string to the return buffer
-                uint32_t dst = d3d_param[2];
-                for (size_t i = 0; i < strlen(info) + 1; i++) {
-                    mem_writeb(dst++, info[i]);
+                    PCI_WRITE(reg, value);
+                    d3d_ret_value = D3D_OK;
                 }
-                d3d_ret_value = D3D_OK;
-            }
-            break;
-            
-        case 0xFE:  // Custom Debug Message
-            {
-                LOG_MSG("D3D: Debug message from wrapper, param1=%d, param2=%d", 
-                    d3d_param[1], d3d_param[2]);
-                d3d_ret_value = D3D_OK;
-            }
-            break;
-            
-        case 0xFF:  // Get API Statistics
-            if (d3d_ret) {
+                break;
+                
+            case 0x30:  // Get D3D wrapper info
+                {
+                    if (d3d.gpu_type >= GPU_TYPE_COUNT) {
+                        d3d.gpu_type = GPU_AUTO_DETECT;
+                    }
+                    
+                    // Return D3D wrapper version and GPU information
+                    // Ensure buffer exists before writing to it
+                    if (d3d_param[2] != 0) {
+                        char info[256];
+                        snprintf(info, sizeof(info), "dgVoodoo2 D3D Wrapper - Emulating %s %s with %dMB VRAM",
+                            gpu_manufacturer[d3d.gpu_type],
+                            d3d_param[1] ? "GPU" : "Display Adapter",
+                            d3d.vram_size / (1024 * 1024));
+                        
+                        // Copy string to the return buffer
+                        uint32_t dst = d3d_param[2];
+                        if (dst != 0) {
+                            for (size_t i = 0; i < strlen(info) + 1; i++) {
+                                mem_writeb(dst++, info[i]);
+                            }
+                        }
+                    }
+                    d3d_ret_value = D3D_OK;
+                }
+                break;
+                
+            case 0xFE:  // Custom Debug Message
+                {
+                    LOG_MSG("D3D: Debug message from wrapper, param1=%d, param2=%d", 
+                        d3d_param[1], d3d_param[2]);
+                    d3d_ret_value = D3D_OK;
+                }
+                break;
+                
+            case 0xFF:  // Get API Statistics
+                if (d3d_ret) {
 #if LOG_D3D
-                mem_writed(d3d_ret, D3D_CALL_COUNTS[d3d_param[1]]);
-                d3d_ret_value = D3D_OK;
+                    uint32_t functionId = d3d_param[1];
+                    if (functionId < 256) {
+                        mem_writed(d3d_ret, D3D_CALL_COUNTS[functionId]);
+                    } else {
+                        mem_writed(d3d_ret, 0);
+                    }
+                    d3d_ret_value = D3D_OK;
 #else
-                mem_writed(d3d_ret, 0);  // Stats not tracked when logging is disabled
-                d3d_ret_value = D3D_FAIL;
+                    mem_writed(d3d_ret, 0);  // Stats not tracked when logging is disabled
+                    d3d_ret_value = D3D_OK;
 #endif
-            }
-            break;
-            
-        default:
-            LOG_MSG("D3D: Unhandled D3D function code %d", value);
-            break;
+                }
+                break;
+                
+            default:
+                LOG_MSG("D3D: Unhandled D3D function code %d", value);
+                break;
+        }
+    } catch (...) {
+        LOG_MSG("D3D: Exception in process_d3d_message for function %d", value);
+        d3d_ret_value = D3D_FAIL;
     }
 }
